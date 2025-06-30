@@ -1,0 +1,306 @@
+Excellent. Using Python to automate this analysis is a fantastic idea. It allows you to process your 100-game record efficiently and generate objective, data-driven insights.
+Here is a guide with Python code examples to accomplish the analyses we've discussed. We will primarily use the sgfmill library to parse SGF files and will structure the code to interact with a Go engine like KataGo for AI analysis.
+Part 1: Setup and Prerequisites
+1. Install Necessary Python Library
+First, you need sgfmill to read your SGF files.
+pip install sgfmill
+
+2. Set Up a Go AI Engine (KataGo)
+For AI-powered analysis (like win rates and blunder detection), you need a Go engine. KataGo is the current standard.
+ * Download KataGo: Get a pre-compiled version for your operating system from the KataGo GitHub releases page.
+ * Download a Network Weight File: KataGo needs a neural network file to function. You can find links to official network files on the same GitHub page.
+ * Create a Config File: Create a simple config.cfg file for KataGo. It only needs to point to the model file.
+   # In config.cfg
+modelFile = /path/to/your/downloaded/network.bin.gz
+
+You will run KataGo from your Python script as a separate process.
+3. Organize Your SGF Files
+Place all 100 of your SGF files into a single directory (e.g., my_games/).
+Part 2: Core Python Script for Analysis
+This script will be the foundation. We will build upon it to perform all the different analyses.
+First, let's create a helper function to run KataGo analysis on a single SGF file. This is the most complex part, as it involves communicating with an external program.
+katago_analyzer.py
+import subprocess
+import json
+import os
+
+# --- Configuration ---
+# Adjust these paths to match your system
+KATAGO_PATH = "/path/to/your/katago" # e.g., C:/Go/katago.exe or /usr/local/bin/katago
+CONFIG_PATH = "/path/to/your/config.cfg"
+
+def analyze_sgf_with_katago(sgf_filepath):
+    """
+    Analyzes a single SGF file with KataGo and returns the analysis data.
+
+    The function sends a query to the KataGo analysis engine and gets back
+    JSON data for every move in the game.
+
+    Args:
+        sgf_filepath (str): The path to the SGF file.
+
+    Returns:
+        list of dicts: A list where each dictionary contains the analysis
+                         for one move (winrate, score, etc.). Returns None on error.
+    """
+    if not os.path.exists(sgf_filepath):
+        print(f"Error: SGF file not found at {sgf_filepath}")
+        return None
+
+    # This command asks KataGo to analyze an entire SGF file and output JSON
+    command = [
+        KATAGO_PATH,
+        "analysis",
+        "-config", CONFIG_PATH,
+        "-analysis-threads", "4", # Adjust based on your CPU cores
+        "-sgf-file", sgf_filepath,
+        "-override-config", "reportAnalysisWinratesAs = WHITE" # Standardizes winrate
+    ]
+
+    try:
+        print(f"Analyzing {os.path.basename(sgf_filepath)}...")
+        # We capture stdout, where KataGo writes its JSON output
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+
+        # KataGo outputs one JSON object per line for each move
+        analysis_data = [json.loads(line) for line in result.stdout.strip().split('\n')]
+        print("Analysis complete.")
+        return analysis_data
+
+    except subprocess.CalledProcessError as e:
+        print(f"Error running KataGo: {e}")
+        print(f"KataGo stderr: {e.stderr}")
+        return None
+    except FileNotFoundError:
+        print(f"Error: KataGo executable not found at '{KATAGO_PATH}'.")
+        print("Please check the KATAGO_PATH variable in the script.")
+        return None
+
+# Example usage (can be run from the main script)
+if __name__ == '__main__':
+    # Create a dummy SGF for testing if you don't have one handy
+    test_sgf_path = "test.sgf"
+    if not os.path.exists(test_sgf_path):
+        with open(test_sgf_path, "w") as f:
+            f.write("(;GM[1]FF[4]CA[UTF-8]AP[SGFC:1.0]KM[6.5]SZ[19]DT[2025-06-30]PB[Black]PW[White];B[pd];W[dp];B[pp];W[dd])")
+
+    analysis = analyze_sgf_with_katago(test_sgf_path)
+    if analysis:
+        # Print winrate for the first few moves
+        for move_data in analysis[:5]:
+            turn_num = move_data.get('turnNumber')
+            winrate = move_data.get('rootInfo', {}).get('winrate')
+            print(f"Turn {turn_num}: White Winrate = {winrate:.2%}")
+
+
+Part 3: Performing The Analyses
+Now, create your main analysis script. This will import sgfmill and our katago_analyzer.
+main_analysis.py
+import os
+import glob
+from sgfmill import sgf
+import numpy as np
+import matplotlib.pyplot as plt
+from collections import defaultdict
+
+# Import our KataGo helper function
+from katago_analyzer import analyze_sgf_with_katago
+
+# --- Configuration ---
+SGF_DIRECTORY = "./my_games/" # Directory with your 100 SGF files
+YOUR_PLAYER_NAME = "YourGoUsername" # IMPORTANT: Set this to your name
+
+# --- Data Loading ---
+def load_game_data(sgf_path):
+    """Loads basic game info using sgfmill."""
+    with open(sgf_path, "rb") as f:
+        game = sgf.Sgf_game.from_bytes(f.read())
+    
+    winner_node = game.get_root()
+    winner = winner_node.get("RE")
+    player_black = winner_node.get("PB")
+    player_white = winner_node.get("PW")
+    
+    return {
+        "winner": winner,
+        "player_black": player_black,
+        "player_white": player_white,
+        "total_moves": len(list(game.main_sequence_iter())) -1
+    }
+
+# --- Analysis 1: Win Rate vs. Game Advancement ---
+def analyze_winrate_progression(all_game_analyses):
+    print("\n--- Starting Win Rate Progression Analysis ---")
+    # Bins for 0-10%, 10-20%, etc.
+    bins = [[] for _ in range(10)]
+
+    for game_info, analysis_data in all_game_analyses:
+        if not analysis_data:
+            continue
+            
+        # Determine if you were Black or White
+        my_color = None
+        if game_info['player_black'] == YOUR_PLAYER_NAME:
+            my_color = 'black'
+        elif game_info['player_white'] == YOUR_PLAYER_NAME:
+            my_color = 'white'
+        else:
+            continue # Skip games you didn't play
+
+        total_moves = game_info['total_moves']
+        if total_moves == 0: continue
+
+        for move_data in analysis_data:
+            turn = move_data['turnNumber']
+            winrate = move_data['rootInfo']['winrate'] # White's winrate
+
+            # Your winrate is White's winrate if you are White, or 1 - White's winrate if you are Black
+            my_winrate = winrate if my_color == 'white' else 1 - winrate
+            
+            # Place winrate into the correct bin
+            bin_index = int((turn / total_moves) * 10)
+            if 0 <= bin_index < 10:
+                bins[bin_index].append(my_winrate)
+
+    # Calculate average for each bin
+    avg_winrates = [np.mean(b) if b else 0 for b in bins]
+    
+    # Plotting
+    plt.figure(figsize=(10, 6))
+    plt.plot([f"{i*10}-{i*10+10}%" for i in range(10)], avg_winrates, marker='o')
+    plt.title(f"Average Win Rate Progression for {YOUR_PLAYER_NAME}")
+    plt.xlabel("Game Advancement (%)")
+    plt.ylabel("Average Win Rate")
+    plt.ylim(0, 1)
+    plt.grid(True)
+    plt.show()
+
+# --- Analysis 2: Blunder Detection ---
+def analyze_blunders(all_game_analyses):
+    print("\n--- Starting Blunder Analysis ---")
+    blunder_threshold = 0.15 # A drop of >15% winrate is a blunder
+    blunders_by_phase = {"Opening": 0, "Mid-game": 0, "Endgame": 0}
+
+    for game_info, analysis_data in all_game_analyses:
+        if not analysis_data: continue
+
+        my_color = 'black' if game_info['player_black'] == YOUR_PLAYER_NAME else 'white'
+        
+        last_winrate = 0.5 # Start at 50/50
+        for i, move_data in enumerate(analysis_data):
+            turn = move_data['turnNumber']
+            current_winrate = move_data['rootInfo']['winrate']
+            
+            # Your winrate is based on your color
+            my_current_winrate = current_winrate if my_color == 'white' else 1 - current_winrate
+            
+            # Check for a blunder only on your turn
+            is_my_turn = (my_color == 'black' and turn % 2 != 0) or \
+                          (my_color == 'white' and turn % 2 == 0)
+            
+            if i > 0 and is_my_turn:
+                winrate_drop = last_winrate - my_current_winrate
+                if winrate_drop > blunder_threshold:
+                    # Categorize by phase
+                    phase_percent = turn / game_info['total_moves']
+                    if phase_percent < 0.25: # First 25% is opening
+                        blunders_by_phase["Opening"] += 1
+                    elif phase_percent < 0.75: # Next 50% is mid-game
+                        blunders_by_phase["Mid-game"] += 1
+                    else: # Last 25% is endgame
+                        blunders_by_phase["Endgame"] += 1
+            
+            last_winrate = my_current_winrate if is_my_turn else (1 - my_current_winrate)
+            
+    print("Blunder Distribution:")
+    print(blunders_by_phase)
+    
+    plt.figure(figsize=(8, 5))
+    plt.bar(blunders_by_phase.keys(), blunders_by_phase.values(), color=['blue', 'green', 'red'])
+    plt.title("Blunders by Game Phase")
+    plt.ylabel("Number of Blunders")
+    plt.show()
+
+
+# --- Analysis 3: Opponent Analysis ---
+def analyze_opponents(all_game_analyses):
+    print("\n--- Starting Opponent Analysis ---")
+    opponent_stats = defaultdict(lambda: {"wins": 0, "losses": 0})
+
+    for game_info, _ in all_game_analyses:
+        my_color = None
+        opponent_name = None
+        if game_info['player_black'] == YOUR_PLAYER_NAME:
+            my_color = 'B'
+            opponent_name = game_info['player_white']
+        elif game_info['player_white'] == YOUR_PLAYER_NAME:
+            my_color = 'W'
+            opponent_name = game_info['player_black']
+        else:
+            continue
+            
+        if not opponent_name: continue
+
+        winner_char = game_info['winner'][0].upper() if game_info['winner'] else ''
+        if winner_char == my_color:
+            opponent_stats[opponent_name]['wins'] += 1
+        else:
+            opponent_stats[opponent_name]['losses'] += 1
+            
+    print("Opponent Win/Loss Records:")
+    for opponent, stats in sorted(opponent_stats.items(), key=lambda item: sum(item[1].values()), reverse=True):
+        total_games = stats['wins'] + stats['losses']
+        win_rate = stats['wins'] / total_games if total_games > 0 else 0
+        print(f"- {opponent}: {stats['wins']} Wins, {stats['losses']} Losses (Win Rate: {win_rate:.1%})")
+
+
+# --- Main Execution ---
+if __name__ == "__main__":
+    sgf_files = glob.glob(os.path.join(SGF_DIRECTORY, "*.sgf"))
+    if not sgf_files:
+        print(f"No SGF files found in '{SGF_DIRECTORY}'. Please check the path.")
+    
+    # This list will store tuples of (basic_info, detailed_analysis)
+    all_game_data = []
+
+    for sgf_file in sgf_files[:20]: # Limiting to 20 for a test run. Remove '[:20]' to run all.
+        basic_info = load_game_data(sgf_file)
+        # The AI analysis is slow, so we cache it.
+        # This creates a .json file for each SGF so we don't re-analyze.
+        analysis_cache_path = sgf_file + ".json"
+        if os.path.exists(analysis_cache_path):
+            print(f"Loading cached analysis for {os.path.basename(sgf_file)}")
+            with open(analysis_cache_path, 'r') as f:
+                detailed_analysis = json.load(f)
+        else:
+            detailed_analysis = analyze_sgf_with_katago(sgf_file)
+            if detailed_analysis:
+                with open(analysis_cache_path, 'w') as f:
+                    json.dump(detailed_analysis, f)
+        
+        all_game_data.append((basic_info, detailed_analysis))
+
+    # --- Run the analyses ---
+    if all_game_data:
+        analyze_winrate_progression(all_game_data)
+        analyze_blunders(all_game_data)
+        analyze_opponents(all_game_data)
+    else:
+        print("No game data was loaded. Aborting analysis.")
+
+
+How to Run and Interpret
+ * Configure: Edit the KATAGO_PATH, CONFIG_PATH, SGF_DIRECTORY, and YOUR_PLAYER_NAME variables at the top of the scripts.
+ * Run: Execute the main script from your terminal:
+   python main_analysis.py
+
+ * Be Patient: The very first run will be slow as KataGo must analyze every game. Subsequent runs will be fast as they will use the cached .json files.
+ * Interpret the Output:
+   * You will see text output in your terminal for the Opponent Analysis.
+   * Matplotlib will generate and display pop-up charts for the Win Rate Progression and Blunder Distribution.
+Further Python Analyses (Ideas for Expansion)
+This code provides a strong foundation. You can expand it to cover the other areas we discussed:
+ * Performance Ahead vs. Behind: Modify the analyze_blunders function. At move 80, check if my_winrate > 0.65. If so, add the game result to an "ahead" list. If my_winrate < 0.35, add it to a "behind" list. Then calculate your win percentage in both scenarios.
+ * Life & Death Scorecard: This is harder. You would need to use KataGo's ownership data for each move to estimate the status of groups, which is a more advanced parsing task.
+ * Territory vs. Influence: In your load_game_data function, analyze the first 20 moves. Count how many of your moves are on the 3rd line vs. the 4th line. If you have significantly more 4th-line moves, you could tag that game as "influence-oriented" and then check your win-rate for those tagged games.
+ 
